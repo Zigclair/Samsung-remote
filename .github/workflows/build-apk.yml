@@ -47,3 +47,12 @@ jobs:
         with:
           name: FrameRemote-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Report successful APK
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          sha256sum app/build/outputs/apk/debug/app-debug.apk > apk-sha256.txt
+          gh issue create --title "APK ready #${{ github.run_number }}" --body "Android debug APK compiled and uploaded successfully. Download the **FrameRemote-debug-apk** artifact from https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} . SHA256: $(cat apk-sha256.txt)"
