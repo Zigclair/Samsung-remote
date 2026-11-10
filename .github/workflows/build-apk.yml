@@ -8,24 +8,41 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Check Android SDK
-        run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          ls "$ANDROID_HOME/platforms"
-          ls "$ANDROID_HOME/build-tools"
       - name: Install Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
       - name: Build debug APK
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        id: compile
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon :app:assembleDebug 2>&1 | tee build.log
+      - name: Report build failure
+        if: failure() && steps.compile.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          {
+            echo 'Automated Android APK build failure.'
+            echo ''
+            echo 'Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            echo ''
+            echo '~~~'
+            grep -E -A 12 '(^e: |^\* What went wrong:|^> |^FAILURE:|error:|Execution failed)' build.log | tail -c 16000 || true
+            echo '~~~'
+          } > failure.md
+          gh issue create --title "APK build failure #${{ github.run_number }}" --body-file failure.md
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: FrameRemote-debug-apk
