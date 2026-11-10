@@ -18,9 +18,26 @@ import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+import java.security.cert.X509Certificate
 
 class MainActivity : Activity() {
-    private val client = OkHttpClient.Builder().connectTimeout(4, TimeUnit.SECONDS).pingInterval(25, TimeUnit.SECONDS).build()
+    private val client: OkHttpClient by lazy {
+        // Samsung TVs commonly present a self-signed certificate on their local port 8002.
+        // This client is only used for the selected local TV address.
+        val trust = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+            override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+        val ssl = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
+        OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS)
+            .pingInterval(25, TimeUnit.SECONDS)
+            .sslSocketFactory(ssl.socketFactory, trust)
+            .hostnameVerifier { _, _ -> true }
+            .build()
+    }
     private var socket: WebSocket? = null
     @Volatile private var connected = false
     private val prefs by lazy { getSharedPreferences("tv", Context.MODE_PRIVATE) }
@@ -177,13 +194,20 @@ class MainActivity : Activity() {
         deviceName.text = "Samsung TV  •  $host"
         connected = false
         socket?.close(1000, "reconnect")
+        connectPort(host, 8002)
+    }
+
+    private fun connectPort(host: String, port: Int) {
         val name = Base64.encodeToString("Frame Remote".toByteArray(), Base64.NO_WRAP)
         val token = prefs.getString("token_$host", "") ?: ""
-        val url = "ws://$host:8001/api/v2/channels/samsung.remote.control?name=$name" +
+        val scheme = if (port == 8002) "wss" else "ws"
+        val url = "$scheme://$host:$port/api/v2/channels/samsung.remote.control?name=$name" +
             if (token.isNotBlank()) "&token=$token" else ""
-        showStatus("Connecting — approve on your TV if prompted")
-        socket = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) { showStatus("Waiting for TV approval…") }
+        showStatus("Connecting securely — approve on your TV if prompted")
+        val candidate = client.newWebSocket(Request.Builder().url(url).build(), object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: Response) {
+                showStatus("Waiting for TV approval…")
+            }
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val obj = JSONObject(text)
@@ -192,22 +216,32 @@ class MainActivity : Activity() {
                             val newToken = obj.optJSONObject("data")?.optString("token", "") ?: ""
                             if (newToken.isNotBlank()) prefs.edit().putString("token_$host", newToken).apply()
                             connected = true
+                            socket = webSocket
                             showStatus("● Connected")
                         }
-                        "ms.channel.unauthorized" -> showStatus("Permission denied on TV")
+                        "ms.channel.unauthorized" -> showStatus("Permission denied — allow Frame Remote on your TV")
                     }
-                } catch (_: Exception) { }
+                } catch (_: Exception) {}
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connected = false
-                showStatus("Connection failed — this TV may require secure pairing")
+                if (connected) { connected = false; showStatus("TV disconnected"); return }
+                if (port == 8002) {
+                    showStatus("Secure connection unavailable; trying standard pairing…")
+                    runOnUiThread { connectPort(host, 8001) }
+                } else {
+                    showStatus("Could not connect: ${t.javaClass.simpleName} — ${t.message ?: "check TV network settings"}")
+                }
             }
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                connected = false
-                showStatus("Disconnected")
+                if (socket === webSocket) {
+                    connected = false
+                    showStatus("Disconnected")
+                }
             }
         })
+        socket = candidate
     }
+
     private fun send(payload: JSONObject) {
         if (!connected || socket?.send(payload.toString()) != true) showStatus("Connect to your TV first")
     }
